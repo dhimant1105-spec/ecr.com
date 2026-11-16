@@ -1,0 +1,11 @@
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+const cors={"Access-Control-Allow-Origin":"*","Access-Control-Allow-Headers":"authorization, apikey, content-type","Access-Control-Allow-Methods":"POST, OPTIONS"};
+const reply=(x:unknown,s=200)=>new Response(JSON.stringify(x),{status:s,headers:{...cors,"Content-Type":"application/json"}});
+Deno.serve(async req=>{if(req.method==="OPTIONS")return new Response("ok",{headers:cors});if(req.method!=="POST")return reply({error:"Method not allowed"},405);
+const url=Deno.env.get("SUPABASE_URL")!,anon=Deno.env.get("SUPABASE_ANON_KEY")!,key=Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,auth=req.headers.get("Authorization");if(!auth)return reply({error:"Unauthorized"},401);
+const caller=createClient(url,anon,{global:{headers:{Authorization:auth}}});const {data:{user},error:ae}=await caller.auth.getUser();if(ae||!user)return reply({error:"Unauthorized"},401);
+const admin=createClient(url,key);const {data:p}=await admin.from("profiles").select("role").eq("id",user.id).single();if(p?.role!=="super_admin")return reply({error:"Super Admin only"},403);
+const b=await req.json(),name=String(b.company_name||"").trim(),email=String(b.admin_email||"").trim().toLowerCase(),password=String(b.temporary_password||"");if(!name||!email||password.length<12)return reply({error:"Company name, admin email and password of 12+ characters required"},400);
+const {data:c,error:ce}=await admin.from("companies").insert({name,establishment_code:b.establishment_code||null}).select().single();if(ce)return reply({error:ce.message},400);
+const {data:u,error:ue}=await admin.auth.admin.createUser({email,password,email_confirm:true});if(ue){await admin.from("companies").delete().eq("id",c.id);return reply({error:ue.message},400)}
+const results=await Promise.all([admin.from("profiles").insert({id:u.user.id,email,role:"company_admin"}),admin.from("company_memberships").insert({company_id:c.id,user_id:u.user.id}),admin.from("statutory_settings").insert({company_id:c.id})]);if(results.some(x=>x.error)){await admin.auth.admin.deleteUser(u.user.id);await admin.from("companies").delete().eq("id",c.id);return reply({error:"Provisioning failed and was rolled back"},500)}return reply({company_id:c.id,user_id:u.user.id});});
